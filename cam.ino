@@ -23,7 +23,7 @@ const char* WIFI_SSID = "yey";
 const char* WIFI_PASS = "12121212";
 // Laptop running server/photo_receiver.py (photos only, for now) or server.py (with AI).
 // Both listen on port 8000. Find the laptop IP with `ipconfig` (Windows, "IPv4 Address").
-const char* SERVER    = "http://10.177.86.180:8000";
+const char* SERVER    = "http://172.22.9.175:8000";
 const char* CAM_NAME  = "top";     // "top" on the camera above the tray, "side" on the angled one
 
 // ---------- Pins ----------
