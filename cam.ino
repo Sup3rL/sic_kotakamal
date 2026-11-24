@@ -26,6 +26,13 @@ const char* WIFI_PASS = "12121212";
 const char* SERVER    = "http://10.177.86.180:8000";
 const char* CAM_NAME  = "top";     // "top" on the camera above the tray, "side" on the angled one
 
+// Exposure tuning (OV2640 / ESP32-CAM)
+const bool AUTO_EXPOSURE = true;    // true = camera decides; false = use MANUAL_EXPOSURE_VALUE
+const int  MANUAL_EXPOSURE_VALUE = 200; // 0..1200 (higher = brighter, can blur if too high)
+const int  AE_LEVEL = 0;            // -2..2 (overall exposure bias)
+const bool AUTO_GAIN = true;        // keep true unless you also tune manual gain
+const int  MANUAL_GAIN = 0;         // 0..30, only used when AUTO_GAIN=false
+
 // ---------- Pins ----------
 const int PIN_TRIGGER = 13;   // from main ESP32 GPIO 27 (plus a shared GND)
 const int PIN_LIGHT   = 4;    // on-board flash LED; or a MOSFET for the LED strip
@@ -72,8 +79,16 @@ bool initCamera() {
 
   sensor_t* s = esp_camera_sensor_get();
   s->set_whitebal(s, 1);
-  s->set_exposure_ctrl(s, 1);
-  s->set_gain_ctrl(s, 1);
+  s->set_exposure_ctrl(s, AUTO_EXPOSURE ? 1 : 0);
+  s->set_ae_level(s, AE_LEVEL);
+  if (!AUTO_EXPOSURE) {
+    s->set_aec_value(s, MANUAL_EXPOSURE_VALUE);
+  }
+
+  s->set_gain_ctrl(s, AUTO_GAIN ? 1 : 0);
+  if (!AUTO_GAIN) {
+    s->set_agc_gain(s, MANUAL_GAIN);
+  }
   // s->set_vflip(s, 1);  // uncomment if the image is upside down
   return true;
 }
