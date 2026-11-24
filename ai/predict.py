@@ -123,8 +123,8 @@ class MoneyDetector:
                 "jenis": "koin" if kelas.startswith("c") else ("lain" if kelas == "lain" else "kertas"),
                 "confidence": round(float(scores[i]), 4),
                 "yakin": float(scores[i]) >= self.thr,
-                "box": [round(max(0, x1), 1), round(max(0, y1), 1),
-                        round(min(w0, x2), 1), round(min(h0, y2), 1)],
+                "box": [round(float(max(0, x1)), 1), round(float(max(0, y1)), 1),
+                        round(float(min(w0, x2)), 1), round(float(min(h0, y2)), 1)],
             })
         items.sort(key=lambda d: (d["box"][1], d["box"][0]))
         if not items:

@@ -57,6 +57,27 @@ hasil["items"]    # [{"kelas","nominal","jenis","confidence","yakin","box":[x1,y
 hasil["result"]   # gambar BGR dengan kotak + label
 ```
 
+## Otomatis: server.py (deteksi tiap foto masuk)
+
+`server.py` di root menggantikan `photo_receiver.py` (port 8000 dan URL `/capture?cam=` sama,
+jadi `cam.ino` tidak perlu diubah). Begitu ESP32-CAM kirim foto, langsung dideteksi:
+
+- `photos/<cam>/<waktu>.jpg` — foto asli
+- `hasil/<cam>/<waktu>.jpg`  — foto berkotak (label + confidence)
+- `hasil/log.txt`           — ringkasan per deteksi (juga dicetak di terminal)
+- `hasil/latest.json`       — hasil deteksi terakhir (untuk dashboard/browser)
+
+Jalankan (dari folder `ai/`, pakai venv AI):
+
+```bash
+.venv/bin/python ../server.py            # Linux
+.venv\Scripts\python ..\server.py        # Windows
+```
+
+Browser `http://localhost:8000` menampilkan foto + hasil terakhir. Matikan dengan Ctrl+C.
+Hasil deteksi tidak disimpan sebagai file terpisah per foto selain yang di atas; kalau mau
+dipakai untuk dashboard SQLite, `latest.json`/`log.txt` bisa dibaca.
+
 ## Catatan
 
 - Ambang yakin bisa diubah: `--thr 0.85` (default) atau `--conf 0.25` (ambang deteksi awal).
