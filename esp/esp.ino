@@ -61,7 +61,7 @@ const int PIN_SERVO   = 25;
 
 // Most cheap relay modules switch ON when IN is LOW ("active low"). If your LED is ON when it
 // should be OFF (and the other way round), change this to false.
-const bool RELAY_ACTIVE_LOW = true;
+const bool RELAY_ACTIVE_LOW = false;
 
 // ---------- Tuning ----------
 const int TRAY_FLAT = 150;                  // calibrated on Uno's servo: tray level
