@@ -8,6 +8,11 @@ Setiap foto masuk langsung dideteksi:
     - hasil/<cam>/<waktu>.jpg      foto berkotak (label + confidence)
     - hasil/log.txt                ringkasan per deteksi (terminal juga menampilkan)
     - hasil/latest.json            hasil deteksi terakhir (untuk dashboard/browser)
+    - hasil/total.json             total terkumpul (untuk LCD di ESP32 main)
+
+LCD di ESP32 main membaca GET /lcd  ->  "seq;status;total;terkumpul"   mis. "12;ok;10000;150000"
+    seq        naik 1 tiap foto dari kamera LCD_CAM (ESP32 tahu ada hasil baru)
+    terkumpul  jumlah semua hasil berstatus "ok" (tersimpan di hasil/total.json)
 
 Jalankan (dari folder ai/, pakai venv AI):
     .venv/bin/python ../server.py            # Linux
@@ -18,6 +23,7 @@ Browser: http://localhost:8000  -> foto terakhir + hasil deteksi terakhir.
 import json
 import socket
 import sys
+import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,6 +38,32 @@ PORT = 8000
 PHOTO_DIR = HERE / "photos"
 OUT_DIR = HERE / "hasil"
 LOG_FILE = OUT_DIR / "log.txt"
+TOTAL_FILE = OUT_DIR / "total.json"
+LCD_CAM = "top"   # hanya kamera ini yang dihitung (kalau nanti ada "side", donasi tidak terhitung dobel)
+
+_lock = threading.Lock()
+lcd_state = {"seq": 0, "status": "-", "total": 0, "terkumpul": 0}
+
+
+def load_total():
+    try:
+        d = json.loads(TOTAL_FILE.read_text(encoding="utf-8"))
+        lcd_state["seq"] = int(d.get("seq", 0))
+        lcd_state["terkumpul"] = int(d.get("terkumpul", 0))
+    except (OSError, ValueError):
+        pass
+
+
+def update_lcd_state(status, total):
+    with _lock:
+        lcd_state["seq"] += 1
+        lcd_state["status"] = status
+        lcd_state["total"] = total
+        if status == "ok":
+            lcd_state["terkumpul"] += total
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        TOTAL_FILE.write_text(json.dumps({"seq": lcd_state["seq"], "terkumpul": lcd_state["terkumpul"]}),
+                              encoding="utf-8")
 
 
 def now():
@@ -85,6 +117,8 @@ class Handler(BaseHTTPRequestHandler):
             of = OUT_DIR / cam
             of.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(of / path.name), hasil["result"])
+        if cam == LCD_CAM:
+            update_lcd_state(hasil["status"], hasil["total"])
         latest = {"waktu": ts.isoformat(), "cam": cam, "foto": str(path), **{k: hasil[k] for k in ("status", "total", "items")}}
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         (OUT_DIR / "latest.json").write_text(json.dumps(latest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -99,6 +133,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.startswith("/lcd"):
+            with _lock:
+                d = dict(lcd_state)
+            self._send_bytes("text/plain", f"{d['seq']};{d['status']};{d['total']};{d['terkumpul']}".encode())
+            return
         if self.path.startswith("/latest.jpg"):
             p = latest_photo()
             if not p:
@@ -142,6 +181,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     PHOTO_DIR.mkdir(exist_ok=True)
     OUT_DIR.mkdir(exist_ok=True)
+    load_total()
     try:
         Handler.detector = MoneyDetector()
         print(f"AI dimuat: model uang_v2.onnx. Mulai mendengarkan di port {PORT}...")
@@ -154,5 +194,6 @@ if __name__ == "__main__":
     except OSError:
         ip = "<ip-laptop>"
     print(f"Server jalan. Di cam.ino: SERVER = \"http://{ip}:{PORT}\"")
+    print(f"Terkumpul sejauh ini: Rp{lcd_state['terkumpul']:,} (reset: hapus hasil/total.json)".replace(",", "."))
     print(f"Foto: {PHOTO_DIR}  |  Hasil: {OUT_DIR}  |  Browser: http://localhost:{PORT}")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

@@ -1,5 +1,5 @@
 /*
- * Kotak Amal Cerdas - BASIC controller (ESP32 DevKit V1), no Wi-Fi / MQTT / AI yet
+ * Kotak Amal Cerdas - controller (ESP32 DevKit V1) + LCD 16x2; Wi-Fi only to read the AI result
  *
  * Flow for every donation:
  *   1. IR sensor sees money falling in
@@ -10,11 +10,14 @@
  *   6. servo tilts the tray (money slides into the vault), then goes back level
  *   7. relay turns the LED OFF
  *   8. VL53L0X measures how full the vault is
+ *   9. LCD shows "Terima kasih!" + the amount the AI read (from server.py GET /lcd)
+ * The LCD works without Wi-Fi too: then it shows the steps and "Terima kasih!" without an amount.
  * The MPU6050 is read the whole time (50 Hz) and summarised once per second. Type "f" to print
  * those rows as "[FEAT] {...}"; ai/record_serial.py uses them to record the Stage 3 dataset.
  *
  * Board: "ESP32 Dev Module" (or "DOIT ESP32 DEVKIT V1"). NOT "AI Thinker ESP32-CAM".
- * Libraries (Library Manager): ESP32Servo, VL53L0X (by Pololu). Wire is built in.
+ * Libraries (Library Manager): ESP32Servo, VL53L0X (by Pololu),
+ *   LiquidCrystal I2C (by Frank de Brabander). Wire, WiFi, HTTPClient are built in.
  *
  * Wiring:
  *   IR FC-51 OUT          -> GPIO 17   (VCC 3V3, GND)
@@ -22,17 +25,30 @@
  *   Trigger to ESP32-CAM  -> GPIO 27 -> IO13 on the camera (plus a shared GND)
  *   Servo MG996R signal   -> GPIO 25   (servo power from the 5V 3A rail, NOT from the ESP32)
  *   MPU6050 + VL53L0X     -> SDA 21 / SCL 22 (3V3, GND)
+ *   LCD 16x2 + I2C backpack (PCF8574) -> same SDA 21 / SCL 22, VCC 5V, GND
+ *                           (address 0x27 or 0x3F is found automatically; turn the blue
+ *                            potentiometer on the back if the screen is blank or shows only blocks)
  *
  * Serial Monitor 115200. Commands:
  *   s = self-check     c = run one full cycle now (as if money fell in)
  *   p = photo only     d = tilt the tray once        l = relay/LED on/off
  *   i = IR state       v = VL53 live on/off          m = MPU live on/off
  *   f = [FEAT] rows for record_serial.py              a number (e.g. 150) = move the servo there
+ *   t = LCD test (shows a fake "Rp10.000" thank-you screen)
  */
 
 #include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 #include <ESP32Servo.h>
 #include <VL53L0X.h>
+#include <LiquidCrystal_I2C.h>
+
+// ---------- Wi-Fi + AI server (same values as cam.ino) ----------
+// Leave WIFI_SSID empty ("") to run without Wi-Fi: the LCD then never shows an amount.
+const char* WIFI_SSID = "yey";
+const char* WIFI_PASS = "12121212";
+const char* SERVER    = "http://172.22.9.175:8000";
 
 // Donation state type must be declared before Arduino generates function prototypes.
 enum State { IDLE, COLLECTING, CAPTURING, DUMPING, RETURNING };
@@ -174,6 +190,102 @@ void motionWindow() {
   win = Window();
 }
 
+// ---------- LCD 16x2 (I2C) ----------
+const bool SHOW_TOTAL = true;               // idle screen also shows "Terkumpul Rp..." (from the server)
+LiquidCrystal_I2C* lcd = nullptr;           // created in lcdBegin() once the I2C address is known
+uint8_t lcdAddr = 0;
+String lcdLine[2];
+unsigned long lcdHoldUntil = 0;             // a message stays at least until then before the idle screen
+
+String rupiah(long v) {                     // 150000 -> "Rp150.000"
+  String s = String(v), out;
+  int n = s.length();
+  for (int i = 0; i < n; i++) {
+    out += s[i];
+    if (i < n - 1 && (n - i - 1) % 3 == 0) out += '.';
+  }
+  return "Rp" + out;
+}
+
+String lcdCenter(String t) {
+  if (t.length() > 16) t = t.substring(0, 16);
+  String pad;
+  for (unsigned i = 0; i < (16 - t.length()) / 2; i++) pad += ' ';
+  return pad + t;
+}
+
+void lcdPrint(int row, String text) {
+  if (!lcd) return;
+  if (text.length() > 16) text = text.substring(0, 16);
+  if (text == lcdLine[row]) return;         // unchanged: don't rewrite (no flicker, no I2C traffic)
+  lcdLine[row] = text;
+  while (text.length() < 16) text += ' ';   // overwrite leftovers of the previous text
+  lcd->setCursor(0, row);
+  lcd->print(text);
+}
+
+void lcdShow(const String& l1, const String& l2, unsigned long holdMs) {
+  lcdPrint(0, lcdCenter(l1));
+  lcdPrint(1, lcdCenter(l2));
+  lcdHoldUntil = millis() + holdMs;
+}
+
+void lcdBegin() {
+  const uint8_t addrs[] = {0x27, 0x3F};     // the two usual PCF8574 / PCF8574A backpack addresses
+  for (uint8_t a : addrs) if (i2cPresent(a)) { lcdAddr = a; break; }
+  if (!lcdAddr) return;
+  lcd = new LiquidCrystal_I2C(lcdAddr, 16, 2);
+  lcd->init();
+  lcd->backlight();
+  lcdShow("Kotak Amal", "Cerdas", 1500);
+}
+
+void showThanks(const String& status, long total) {
+  if (status == "ok" && total > 0) {        // AI is sure: show the amount
+    lcdShow("Terima kasih!", rupiah(total), 6000);
+    Serial.printf("[LCD]    Terima kasih! %s\n", rupiah(total).c_str());
+  } else {                                  // "ragu"/"kosong"/no server: never show a wrong number
+    lcdShow("Terima kasih!", "Semoga berkah", 4000);
+    Serial.printf("[LCD]    Terima kasih! (no amount: %s)\n", status.length() ? status.c_str() : "no AI result");
+  }
+}
+
+// ---------- Wi-Fi + AI result (server.py GET /lcd -> "seq;status;total;terkumpul") ----------
+const unsigned long RESULT_TIMEOUT_MS = 15000;  // camera upload + AI; after this just say thank you
+long lastSeq = -1, terkumpul = -1;
+bool waitResult = false;
+unsigned long resultDeadline = 0, nextPoll = 0, nextSync = 0;
+
+void wifiBegin() {
+  if (!WIFI_SSID[0]) return;
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);         // does not wait: the box works while Wi-Fi connects
+  Serial.printf("[WIFI]   connecting to \"%s\" in the background\n", WIFI_SSID);
+}
+
+bool fetchLcd(long& seq, String& status, long& total, long& sum) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  HTTPClient http;
+  http.setConnectTimeout(700);
+  http.setTimeout(1000);
+  http.begin(String(SERVER) + "/lcd");
+  bool ok = false;
+  if (http.GET() == 200) {
+    String b = http.getString();
+    int a = b.indexOf(';'), c = b.indexOf(';', a + 1), d = b.indexOf(';', c + 1);
+    if (a > 0 && c > a && d > c) {
+      seq = b.substring(0, a).toInt();
+      status = b.substring(a + 1, c);
+      total = b.substring(c + 1, d).toInt();
+      sum = b.substring(d + 1).toInt();
+      ok = true;
+    }
+  }
+  http.end();
+  return ok;
+}
+
 // ---------- Donation flow ----------
 State state = IDLE;
 unsigned long stateAt = 0, lastActivity = 0;
@@ -182,6 +294,7 @@ void setState(State s) { state = s; stateAt = millis(); }
 void startCycle(const char* why) {
   Serial.printf("[IR]     %s (IR passes so far: %lu)\n", why, irCount);
   setRelay(true);                          // step 2: LED on
+  lcdShow("Uang terdeteksi", "Mohon tunggu...", 0);
   lastActivity = millis();
   setState(COLLECTING);
 }
@@ -197,6 +310,9 @@ void donationFlow() {
       if (takeIrHit()) lastActivity = millis();
       if (millis() - lastActivity >= QUIET_MS + SETTLE_MS || dt >= MAX_COLLECT_MS) {
         triggerCamera();                    // step 4: photo
+        lcdShow("Menghitung...", "Mohon tunggu", 0);
+        waitResult = WiFi.status() == WL_CONNECTED;   // step 9 waits for the AI only with Wi-Fi
+        resultDeadline = millis() + RESULT_TIMEOUT_MS;
         setState(CAPTURING);
       }
       break;
@@ -223,11 +339,64 @@ void donationFlow() {
         setRelay(false);                    // step 7: LED off
         reportVault();                      // step 8: how full is the vault
         takeIrHit();                        // ignore anything the tilt itself caused
+        if (!waitResult) showThanks("", 0); // no Wi-Fi: thank the donor right away
         Serial.println("---- ready for the next donation ----");
         setState(IDLE);
       }
       break;
   }
+}
+
+// Step 9: once the tray is back (IDLE), ask the server for the AI result. Only while IDLE, so the
+// short HTTP call never delays the servo. The IR still counts by interrupt meanwhile.
+void serverTick() {
+  static bool wasConnected = false;
+  bool conn = WiFi.status() == WL_CONNECTED;
+  if (conn != wasConnected) {
+    wasConnected = conn;
+    if (conn) Serial.printf("[WIFI]   OK, IP %s, server %s\n", WiFi.localIP().toString().c_str(), SERVER);
+    else if (WIFI_SSID[0]) Serial.println("[WIFI]   disconnected (LCD shows no amounts until it is back)");
+    nextSync = 0;
+  }
+  if (state != IDLE) return;
+
+  long seq, total, sum;
+  String st;
+  if (waitResult) {
+    if (millis() >= nextPoll) {
+      nextPoll = millis() + 700;
+      if (fetchLcd(seq, st, total, sum) && seq != lastSeq) {
+        bool known = lastSeq >= 0;          // without a baseline we can't tell old from new
+        lastSeq = seq;
+        terkumpul = sum;
+        if (known) {
+          waitResult = false;
+          Serial.printf("[AI]     status=%s total=%s, terkumpul %s\n", st.c_str(), rupiah(total).c_str(), rupiah(sum).c_str());
+          showThanks(st, total);
+          return;
+        }
+      }
+    }
+    if (millis() >= resultDeadline) {
+      waitResult = false;
+      Serial.println("[AI]     no result from server.py in time (is it running? IP right in cam.ino?)");
+      showThanks("", 0);
+    }
+    return;
+  }
+  if (conn && millis() >= nextSync) {       // every 10 s: baseline seq + total for the idle screen
+    nextSync = millis() + 10000;
+    if (fetchLcd(seq, st, total, sum)) { lastSeq = seq; terkumpul = sum; }
+  }
+}
+
+// Idle screen: alternates a welcome text and the collected total; warns when the vault is full.
+void lcdTick() {
+  if (!lcd || state != IDLE || waitResult || millis() < lcdHoldUntil) return;
+  if (fullnessPct >= 90) { lcdShow("KOTAK PENUH", "Hubungi pengurus", 0); return; }
+  bool totalPage = SHOW_TOTAL && terkumpul >= 0 && (millis() / 4000) % 2 == 1;
+  if (totalPage) lcdShow("Terkumpul", rupiah(terkumpul), 0);
+  else lcdShow("Kotak Amal", "Silakan berinfaq", 0);
 }
 
 // ---------- Self-check ----------
@@ -250,7 +419,13 @@ void selfCheck(bool atBoot) {
                 RELAY_ACTIVE_LOW ? "LOW" : "HIGH");
   Serial.printf("[SERVO]  pin %d, level = %d deg, tilt = %d deg. Type d to test\n", PIN_SERVO, TRAY_FLAT, TRAY_DUMP);
   Serial.printf("[CAMERA] trigger pin %d -> CAM IO13. Type p, then look at the camera's Serial Monitor\n", PIN_TRIGGER);
-  Serial.println("Commands: s c p d l i v m f, or a number = servo angle");
+  if (lcd) Serial.printf("[LCD]    OK (I2C 0x%02X). Type t to test\n", lcdAddr);
+  else Serial.println("[LCD]    MISSING: nothing at I2C 0x27/0x3F. Check SDA 21 / SCL 22 / 5V / GND");
+  if (!WIFI_SSID[0]) Serial.println("[WIFI]   off (WIFI_SSID empty): LCD shows no amounts");
+  else if (WiFi.status() == WL_CONNECTED)
+    Serial.printf("[WIFI]   OK, IP %s, server %s, last seq %ld\n", WiFi.localIP().toString().c_str(), SERVER, lastSeq);
+  else Serial.printf("[WIFI]   not connected yet to \"%s\" (2.4 GHz only)\n", WIFI_SSID);
+  Serial.println("Commands: s c p d l i v m f t, or a number = servo angle");
   Serial.println("================================");
 }
 
@@ -280,6 +455,7 @@ void serialCommands() {
   if (c == 'v') { vlLive = !vlLive; Serial.printf("[VL53]   live %s\n", vlLive ? "ON" : "OFF"); }
   if (c == 'm') { mpuLive = !mpuLive; Serial.printf("[MPU]    live %s\n", mpuLive ? "ON" : "OFF"); }
   if (c == 'f') { featSerial = !featSerial; Serial.printf("[FEAT] %s\n", featSerial ? "ON" : "OFF"); }
+  if (c == 't') showThanks("ok", 10000);
 }
 
 void vaultLive() {
@@ -304,6 +480,8 @@ void setup() {
   tray.setPeriodHertz(50);
   tray.attach(PIN_SERVO, 500, 2400);
   tray.write(TRAY_FLAT);
+  lcdBegin();
+  wifiBegin();
 
   Serial.println("\nKotak Amal Cerdas - basic controller (IR -> LED -> photo -> servo -> LED off)");
   selfCheck(true);
@@ -317,4 +495,6 @@ void loop() {
   sampleMotion();
   motionWindow();
   vaultLive();
+  serverTick();
+  lcdTick();
 }

@@ -140,6 +140,22 @@ Biarkan terminal ini terbuka (jangan ditutup). Server siap di port **8000**.
 
 ---
 
+## 8b. LCD 16x2 di ESP32 main
+
+- Wiring: LCD + backpack I2C → SDA 21 / SCL 22 (satu jalur dengan MPU & VL53), VCC 5V, GND.
+  Alamat 0x27/0x3F dideteksi otomatis. Layar kosong/kotak-kotak → putar potensiometer biru di belakang.
+- Library: **LiquidCrystal I2C** (Frank de Brabander).
+- Di `esp/esp.ino` samakan `WIFI_SSID`, `WIFI_PASS`, `SERVER` dengan `cam.ino`.
+- Alur layar: `Kotak Amal / Silakan berinfaq` ⇄ `Terkumpul / Rp…` → `Uang terdeteksi` →
+  `Menghitung...` → `Terima kasih! / Rp10.000` (status `ok`) atau `Terima kasih! / Semoga berkah`
+  (status `ragu`/`kosong`/server mati — nominal tidak ditampilkan supaya tidak salah).
+- Vault ≥ 90%: `KOTAK PENUH / Hubungi pengurus`.
+- Server menyediakan `GET /lcd` → `seq;status;total;terkumpul`. Total tersimpan di `hasil/total.json`
+  (hapus file ini untuk reset ke Rp0). Hanya kamera `top` yang dihitung.
+- Uji LCD tanpa uang: ketik `t` di Serial Monitor ESP32 main.
+
+---
+
 ## 9. Deteksi manual tanpa server (CLI)
 
 Jika hanya ingin menguji foto yang sudah ada (tanpa ESP32-CAM):
