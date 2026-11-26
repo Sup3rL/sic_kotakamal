@@ -13,7 +13,8 @@
  *   9. LCD shows "Terima kasih!" + the amount the AI read (from server.py GET /lcd)
  * The LCD works without Wi-Fi too: then it shows the steps and "Terima kasih!" without an amount.
  * The MPU6050 is read the whole time (50 Hz) and summarised once per second. Type "f" to print
- * those rows as "[FEAT] {...}"; ai/record_serial.py uses them to record the Stage 3 dataset.
+ * those rows as "[FEAT] {...}" and "r" for the raw samples; record.py uses both to record the
+ * Stage 3 dataset.
  *
  * Board: "ESP32 Dev Module" (or "DOIT ESP32 DEVKIT V1"). NOT "AI Thinker ESP32-CAM".
  * Libraries (Library Manager): ESP32Servo, VL53L0X (by Pololu),
@@ -33,8 +34,11 @@
  *   s = self-check     c = run one full cycle now (as if money fell in)
  *   p = photo only     d = tilt the tray once        l = relay/LED on/off
  *   i = IR state       v = VL53 live on/off          m = MPU live on/off
- *   f = [FEAT] rows for record_serial.py              a number (e.g. 150) = move the servo there
+ *   f = [FEAT] rows (1/s, for scikit-learn)           r = [RAW] rows (50/s, for Edge Impulse)
  *   t = LCD test (shows a fake "Rp10.000" thank-you screen)
+ *   a number (e.g. 150) = move the servo there.
+ * record.py turns f and r on by itself (close the Serial Monitor first). While f or r is on, the
+ * box does not call server.py (an HTTP call would pause the MPU sampling and leave gaps in the data).
  */
 
 #include <Wire.h>
@@ -78,7 +82,7 @@ const int VAULT_FULL_MM  = 40;              // reading when the vault is full
 Servo tray;
 VL53L0X tof;
 bool hasTof = false, hasMpu = false;
-bool vlLive = false, mpuLive = false, featSerial = false;
+bool vlLive = false, mpuLive = false, featSerial = false, rawSerial = false;
 int fullnessPct = -1;
 unsigned long servoBusyUntil = 0;
 
@@ -163,6 +167,11 @@ void sampleMotion() {
   win.accMax = max(win.accMax, mag); win.accMin = min(win.accMin, mag);
   win.gyroMax = max(win.gyroMax, g); win.gyroSum += g;
   win.n++;
+  // Raw 50 Hz samples for Edge Impulse (record.py saves them to data/raw/). Type "r" to toggle.
+  if (rawSerial) {
+    Serial.printf("[RAW] %lu,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%d\n", lastSample, ax, ay, az, gx, gy, gz,
+                  millis() < servoBusyUntil ? 1 : 0);
+  }
 }
 
 void motionWindow() {
@@ -360,10 +369,14 @@ void serverTick() {
   }
   if (state != IDLE) return;
 
+  // Recording a dataset (record.py turned f/r on): no HTTP calls, they block the loop for up to
+  // ~1.7 s and the MPU would miss samples. The LCD then just says thank you after the timeout.
+  bool recording = featSerial || rawSerial;
+
   long seq, total, sum;
   String st;
   if (waitResult) {
-    if (millis() >= nextPoll) {
+    if (!recording && millis() >= nextPoll) {
       nextPoll = millis() + 700;
       if (fetchLcd(seq, st, total, sum) && seq != lastSeq) {
         bool known = lastSeq >= 0;          // without a baseline we can't tell old from new
@@ -384,7 +397,7 @@ void serverTick() {
     }
     return;
   }
-  if (conn && millis() >= nextSync) {       // every 10 s: baseline seq + total for the idle screen
+  if (conn && !recording && millis() >= nextSync) {   // every 10 s: baseline seq + total for the idle screen
     nextSync = millis() + 10000;
     if (fetchLcd(seq, st, total, sum)) { lastSeq = seq; terkumpul = sum; }
   }
@@ -425,7 +438,7 @@ void selfCheck(bool atBoot) {
   else if (WiFi.status() == WL_CONNECTED)
     Serial.printf("[WIFI]   OK, IP %s, server %s, last seq %ld\n", WiFi.localIP().toString().c_str(), SERVER, lastSeq);
   else Serial.printf("[WIFI]   not connected yet to \"%s\" (2.4 GHz only)\n", WIFI_SSID);
-  Serial.println("Commands: s c p d l i v m f t, or a number = servo angle");
+  Serial.println("Commands: s c p d l i v m f r t, or a number = servo angle");
   Serial.println("================================");
 }
 
@@ -455,6 +468,7 @@ void serialCommands() {
   if (c == 'v') { vlLive = !vlLive; Serial.printf("[VL53]   live %s\n", vlLive ? "ON" : "OFF"); }
   if (c == 'm') { mpuLive = !mpuLive; Serial.printf("[MPU]    live %s\n", mpuLive ? "ON" : "OFF"); }
   if (c == 'f') { featSerial = !featSerial; Serial.printf("[FEAT] %s\n", featSerial ? "ON" : "OFF"); }
+  if (c == 'r') { rawSerial = !rawSerial; Serial.printf("[RAW] %s\n", rawSerial ? "ON" : "OFF"); }
   if (c == 't') showThanks("ok", 10000);
 }
 
