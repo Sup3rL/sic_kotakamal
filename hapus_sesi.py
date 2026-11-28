@@ -18,7 +18,7 @@ LABELS = ["Normal", "Diguncang", "Diangkat", "Terguling"]
 def buang(path, sesi):
     if not path.exists():
         return 0
-    with open(path, newline="", encoding="utf-8") as fh:
+    with open(path, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         kolom = reader.fieldnames
         rows = list(reader)
